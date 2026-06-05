@@ -2,6 +2,11 @@ name: Deploy to droplet
 on:
   push:
     branches: [main]
+    paths:
+      - 'backend/**'
+      - 'admin/**'
+      - 'website/**'
+      - '.github/workflows/deploy.yml'
 jobs:
   deploy:
     runs-on: ubuntu-latest
