@@ -2,27 +2,89 @@
 /*
  * Seed the full Master RN curriculum: 17 modules, 304 lessons, + app_content.
  *
+ * The module / lesson / app_content write endpoints require admin auth, so this
+ * script logs in for an admin JWT and sends "Authorization: Bearer <token>" on
+ * every write. Supply credentials via flags or env, or pass an existing token;
+ * with nothing supplied it prompts. The password is never logged. (Auth matches
+ * scripts/import-module.js.)
+ *
  * Usage:
- *   node scripts/seed-curriculum.js https://api.masterreactnative.me
- *   node scripts/seed-curriculum.js http://localhost:5000
+ *   node scripts/seed-curriculum.js <base-url> [auth options]
+ *
+ * Examples:
+ *   # Credentials as flags (non-interactive):
+ *   node scripts/seed-curriculum.js https://api.masterreactnative.me --username admin --password secret
+ *
+ *   # Credentials via env vars:
+ *   MRN_ADMIN_USERNAME=admin MRN_ADMIN_PASSWORD=secret \\
+ *     node scripts/seed-curriculum.js https://api.masterreactnative.me
+ *
+ *   # Using an existing admin JWT (skips login):
+ *   node scripts/seed-curriculum.js https://api.masterreactnative.me --token eyJ...
  *
  * Requires Node 18+ for built-in fetch.
  * NOTE: This script does NOT dedupe — re-running creates duplicate modules.
  * For a clean reseed, truncate the modules table first (cascade deletes lessons).
  */
 
-const baseUrl = process.argv[2];
+const readline = require('readline');
+
+// Flags that take a value (as "--key value" or "--key=value"). Matches import-module.js.
+const VALUE_FLAGS = ['username', 'password', 'token'];
+
+// Parse argv into positionals, boolean flags, and value flags.
+const rawArgs = process.argv.slice(2);
+const positional = [];
+const boolFlags = new Set();
+const valueFlags = {};
+for (let i = 0; i < rawArgs.length; i++) {
+  const a = rawArgs[i];
+  if (!a.startsWith('--')) {
+    positional.push(a);
+    continue;
+  }
+  const eq = a.indexOf('=');
+  if (eq !== -1) {
+    valueFlags[a.slice(2, eq)] = a.slice(eq + 1); // --key=value
+  } else {
+    const key = a.slice(2);
+    if (VALUE_FLAGS.includes(key) && i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith('--')) {
+      valueFlags[key] = rawArgs[++i]; // --key value
+    } else {
+      boolFlags.add(key);
+    }
+  }
+}
+
+const baseUrl = positional[0];
+
+// Admin credentials may come from flags or environment. Password is never logged.
+// Matches import-module.js exactly.
+const ADMIN_USERNAME = valueFlags.username || process.env.MRN_ADMIN_USERNAME || '';
+const ADMIN_PASSWORD = valueFlags.password || process.env.MRN_ADMIN_PASSWORD || '';
+const ADMIN_TOKEN = valueFlags.token || process.env.MRN_ADMIN_TOKEN || '';
+
 if (!baseUrl) {
-  console.error('Usage: node scripts/seed-curriculum.js <base-url>');
-  console.error('Example: node scripts/seed-curriculum.js http://localhost:5000');
+  console.error('Usage: node scripts/seed-curriculum.js <base-url> [auth options]');
+  console.error('Options:');
+  console.error('  --username <name>   admin username');
+  console.error('  --password <pass>   admin password');
+  console.error('  --token <jwt>       use an existing admin JWT directly, skip login');
+  console.error('  (env: MRN_ADMIN_USERNAME, MRN_ADMIN_PASSWORD, MRN_ADMIN_TOKEN)');
+  console.error('Example: node scripts/seed-curriculum.js https://api.masterreactnative.me --username admin --password secret');
   process.exit(1);
 }
+
+let authToken = null;
 
 async function api(method, path, body) {
   const url = `${baseUrl.replace(/\/$/, '')}${path}`;
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -32,6 +94,59 @@ async function api(method, path, body) {
     throw new Error(`${method} ${path} → ${res.status}: ${json?.message || text.slice(0, 200)}`);
   }
   return json?.data ?? json;
+}
+
+/* ----------------------------- admin login ----------------------------- */
+// These helpers are copied from scripts/import-module.js so the login and auth
+// behavior is identical.
+function ask(query) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => rl.question(query, (a) => { rl.close(); resolve(a); }));
+}
+
+// Hidden prompt: mute readline's echo so the typed password never shows.
+function askHidden(query) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let muted = false;
+    rl._writeToOutput = (str) => {
+      if (!muted) rl.output.write(str); // show the prompt itself
+    };
+    process.stdout.write(query);
+    muted = true;
+    rl.question('', (answer) => {
+      rl.close();
+      process.stdout.write('\n');
+      resolve(answer);
+    });
+  });
+}
+
+async function loginWith(username, password) {
+  const result = await api('POST', '/api/admin/login', { username, password });
+  if (!result || !result.token) throw new Error('Login did not return a token');
+  authToken = result.token;
+}
+
+// Resolve the admin Bearer token. Order: explicit token, then username +
+// password (flags or env, non-interactive), then an interactive prompt as a
+// last resort. The password is never logged.
+async function authenticate() {
+  if (ADMIN_TOKEN) {
+    authToken = ADMIN_TOKEN;
+    console.log('Using provided admin token.\n');
+    return;
+  }
+  if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+    await loginWith(ADMIN_USERNAME.trim(), ADMIN_PASSWORD);
+    console.log(`Logged in as admin (${ADMIN_USERNAME.trim()}).\n`);
+    return;
+  }
+  // Fallback: interactive prompt (only when nothing was supplied).
+  const username = (await ask('Admin username: ')).trim();
+  const password = await askHidden('Admin password: ');
+  await loginWith(username, password);
+  console.log('Logged in as admin.\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +666,10 @@ export function useExampleState(initial = 0) {
 async function main() {
   const totalLessons = MODULES.reduce((s, m) => s + m.lessons.length, 0);
   console.log(`\nSeeding ${MODULES.length} modules and ${totalLessons} lessons to ${baseUrl}\n`);
+
+  // All seed operations are writes, which require admin auth. Resolve the admin
+  // Bearer token before any write (token, then user + password, then prompt).
+  await authenticate();
 
   let lessonsCreated = 0;
   let createdModules = [];
