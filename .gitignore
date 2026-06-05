@@ -1,0 +1,36 @@
+# Master RN, Android, monorepo root .gitignore
+# Goal: never commit dependencies, real env files, build output, or signing secrets.
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment / secrets, never commit a real .env (only the .env.example templates)
+.env
+.env.*
+!.env.example
+
+# Build output
+build/
+dist/
+**/build/
+**/dist/
+
+# Android build outputs and signing material (RN CLI app, created in a later step)
+android-app/android/build/
+android-app/android/app/build/
+android-app/android/.gradle/
+android-app/android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
