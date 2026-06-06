@@ -1,17 +1,631 @@
-// PLACEHOLDER for the Explore tab ("Learning Path"). The real all-modules list
-// is its own later task; this only exists so the tab bar is fully functional.
-import React from 'react';
-import PlaceholderScreen from '../../components/PlaceholderScreen';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  View, Text, ScrollView, Pressable, StyleSheet, RefreshControl, Image, Modal,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import ScreenHeader from '../../components/ScreenHeader';
+import ErrorState from '../../components/ErrorState';
+import Skeleton from '../../components/Skeleton';
+import Icon from '../../components/Icon';
+import { GatePopup } from '../../components/BlurGate';
 import { I } from '../../theme/icons';
+import { colors } from '../../theme/tokens';
+import { font } from '../../theme/fonts';
+import { useAuth } from '../../context/AuthContext';
+import { useModules, useCategories, useCategoryModules } from '../../api/hooks';
+import { useCompleted } from '../../storage/completed';
+import { useLastLesson } from '../../storage/lastLesson';
+import { getModuleLessons } from '../../api/modules';
+import type { Lesson } from '../../api/mock';
+import { ExploreStackParamList } from '../../navigation/types';
+
+// Guests get the first 5 modules free (by order_index rank); 6+ are locked.
+const FREE_MODULES_FOR_GUEST = 5;
+
+// All values: ScreenModules × 1.2 × 0.85 = ×1.02 (≈ design size).
+const SCROLL_PAD_H = 16;
+const SCROLL_PAD_TOP = 14;
+const SCROLL_PAD_BOTTOM = 98;
+
+const HEADER_MT = 14;
+const TITLE_FS = 31;
+const TITLE_LS = -0.61;
+const META_MT = 4;
+const META_FS = 14;
+
+const LIST_MT = 14;
+const LIST_GAP = 12;
+
+const CARD_RADIUS = 22;
+const CARD_PAD_V = 16;
+const CARD_PAD_H = 18;
+const CARD_GAP = 12;
+const CARD_BORDER_W = 1;
+const CARD_BORDER_W_CURRENT = 1.6;
+
+const THUMB_W = 71;
+const THUMB_H = 80;
+const THUMB_R = 16;
+
+const KICKER_FS = 10;
+const KICKER_LS = 1.0;
+const CARD_TITLE_FS = 16;
+const CARD_TITLE_MT = 2;
+const CARD_META_FS = 12;
+const CARD_META_MT = 8;
+const CARD_META_ICON = 13;
+const CARD_META_GAP = 5;
+
+const TRACK_MT = 8;
+const TRACK_H = 5;
+const TRACK_R = 3;
+
+const PCT_FS = 13;
+const PCT_GAP = 8;
+
+/* Title-row inline AI Tutor pill */
+const AI_PILL_PAD_V = 7;
+const AI_PILL_PAD_H = 14;
+const AI_PILL_FS = 12;
+const AI_PILL_ICON = 14;
+const AI_PILL_GAP = 5;
+
+/* Filter bottom sheet */
+const SHEET_RADIUS = 22;
+const SHEET_PAD = 20;
+const SHEET_MAX_H_PCT = 0.6;
+const SHEET_TITLE_FS = 19;
+const SHEET_CLOSE_SIZE = 34;
+const SHEET_ROW_PAD_V = 14;
+const SHEET_DOT_SIZE = 14;
+const SHEET_ROW_FS = 16;
+
+type Mod = {
+  id: number;
+  title: string;
+  description: string;
+  icon: string;
+  image_url?: string | null;
+  background_color: string;
+  order_index: number;
+};
+
+function formatTime(totalMinutes: number): string {
+  if (totalMinutes <= 0) return '—';
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
 
 export default function Modules() {
+  const nav = useNavigation<NativeStackNavigationProp<ExploreStackParamList>>();
+  const { isGuest } = useAuth();
+  const { data, loading, error, refresh } = useModules();
+  const { data: categories } = useCategories();
+  const { completed } = useCompleted();
+  const { lastLesson } = useLastLesson();
+  const modules = data ?? [];
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [selectedCatId, setSelectedCatId] = useState<number | null>(null);
+  const [gate, setGate] = useState<{ title?: string; subtitle?: string } | null>(null);
+
+  // Rank every module by order_index; a module's 1-based rank is its
+  // "position". For guests, positions > 5 are locked.
+  const lockedModuleIds = useMemo(() => {
+    if (!isGuest) return new Set<number>();
+    const ranked = [...modules].sort(
+      (a, b) => (a.order_index ?? 0) - (b.order_index ?? 0),
+    );
+    return new Set(ranked.slice(FREE_MODULES_FOR_GUEST).map((m) => m.id));
+  }, [isGuest, modules]);
+
+  // Fetch category-scoped module list when a category is picked.
+  const catFiltered = useCategoryModules(selectedCatId);
+  const allowedIds = useMemo(() => {
+    if (selectedCatId == null) return null;
+    return new Set((catFiltered.data ?? []).map((m) => m.id));
+  }, [selectedCatId, catFiltered.data]);
+  const displayModules = useMemo(
+    () => (allowedIds ? modules.filter((m) => allowedIds.has(m.id)) : modules),
+    [modules, allowedIds],
+  );
+
+  const [lessonsByModule, setLessonsByModule] = useState<Record<number, Lesson[]>>({});
+  const [lessonsLoading, setLessonsLoading] = useState(false);
+
+  // Fetch every module's lessons in parallel so we can compute totals + per-row
+  // counts without scattering per-row API calls.
+  useEffect(() => {
+    if (modules.length === 0) return;
+    let cancelled = false;
+    setLessonsLoading(true);
+    Promise.all(
+      modules.map((m) => getModuleLessons(m.id).catch(() => [] as Lesson[]))
+    ).then((results) => {
+      if (cancelled) return;
+      const map: Record<number, Lesson[]> = {};
+      modules.forEach((m, i) => { map[m.id] = results[i]; });
+      setLessonsByModule(map);
+      setLessonsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [modules]);
+
+  const completedIds = useMemo(() => new Set(completed), [completed]);
+  const currentModuleId = lastLesson?.moduleId ?? null;
+
+  const totals = useMemo(() => {
+    let lessons = 0;
+    let minutes = 0;
+    displayModules.forEach((m) => {
+      const arr = lessonsByModule[m.id] ?? [];
+      lessons += arr.length;
+      minutes += arr.reduce((s, l) => s + (l.read_time || 0), 0);
+    });
+    return { lessons, minutes };
+  }, [displayModules, lessonsByModule]);
+
+  const showSkeleton = (loading || lessonsLoading) && modules.length === 0;
+  const selectedCat = (categories ?? []).find((c) => c.id === selectedCatId) ?? null;
+
+  const openChat = () => {
+    // ExploreStack → MainTabs parent → "Chat" tab.
+    const parent = nav.getParent();
+    parent?.navigate('Chat' as never);
+  };
+
+  const scroll = (
+    <ScrollView
+      contentContainerStyle={styles.scroll}
+      showsVerticalScrollIndicator={false}
+      refreshControl={<RefreshControl refreshing={loading} onRefresh={refresh} tintColor={colors.coral} />}>
+      <View style={styles.titleRow}>
+        <Text style={styles.title}>Learning Path</Text>
+        <Pressable
+          onPress={openChat}
+          accessibilityRole="button"
+          accessibilityLabel="AI Tutor online — tap to chat"
+          hitSlop={6}
+          style={({ pressed }) => [styles.aiPill, pressed && { opacity: 0.85 }]}>
+          <Icon d={I.sparkle} size={AI_PILL_ICON} color={colors.white} fill={colors.white} strokeWidth={0} />
+          <Text style={styles.aiPillText}>AI Tutor</Text>
+        </Pressable>
+      </View>
+      <Text style={styles.meta}>
+        {selectedCat
+          ? `${selectedCat.name} · ${totals.lessons} lessons · ${formatTime(totals.minutes)}`
+          : totals.lessons > 0
+            ? `${totals.lessons} lessons · ${formatTime(totals.minutes)} total`
+            : 'Pick a topic and start building.'}
+      </Text>
+
+      {error && !modules.length ? (
+        <ErrorState message={error} onRetry={refresh} />
+      ) : showSkeleton ? (
+        <View style={{ gap: LIST_GAP, marginTop: LIST_MT }}>
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} height={130} radius={CARD_RADIUS} />)}
+        </View>
+      ) : displayModules.length === 0 ? (
+        <Text style={styles.empty}>No modules in this category yet.</Text>
+      ) : (
+        <View style={{ gap: LIST_GAP, marginTop: LIST_MT }}>
+          {displayModules.map((m, i) => {
+            const locked = lockedModuleIds.has(m.id);
+            return (
+              <ModuleCard
+                key={m.id}
+                module={m as Mod}
+                index={i}
+                isCurrent={!isGuest && m.id === currentModuleId}
+                isGuest={isGuest}
+                locked={locked}
+                lessons={lessonsByModule[m.id] ?? []}
+                completedIds={completedIds}
+                onPress={() =>
+                  locked
+                    ? setGate({})
+                    : nav.navigate('ModuleDetail', { moduleId: m.id })
+                }
+              />
+            );
+          })}
+        </View>
+      )}
+    </ScrollView>
+  );
+
   return (
-    <PlaceholderScreen
-      title="Learning Path"
-      subtitle="All 17 modules"
-      emptyIcon={I.layers}
-      emptyTitle="Modules list coming soon"
-      emptySub="The full learning path will live here."
-    />
+    <SafeAreaView style={styles.wrap} edges={['top']}>
+      <ScreenHeader
+        title="All Modules"
+        showBack={nav.canGoBack()}
+        rightIcon={I.filter}
+        rightLabel="Filter"
+        onRightPress={() => setFilterOpen(true)}
+      />
+      {scroll}
+
+      <FilterSheet
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        categories={categories ?? []}
+        selectedCatId={selectedCatId}
+        onSelect={(id) => {
+          setSelectedCatId(id);
+          setFilterOpen(false);
+        }}
+      />
+
+      <GatePopup
+        visible={gate !== null}
+        title={gate?.title}
+        subtitle={gate?.subtitle}
+        onClose={() => setGate(null)}
+      />
+    </SafeAreaView>
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* MODULE CARD                                                                 */
+/* -------------------------------------------------------------------------- */
+
+type ModuleCardProps = {
+  module: Mod;
+  index: number;
+  isCurrent: boolean;
+  isGuest?: boolean;
+  locked?: boolean;
+  lessons: Lesson[];
+  completedIds: Set<number>;
+  onPress: () => void;
+};
+
+function ModuleCard({ module: m, index, isCurrent, isGuest, locked, lessons, completedIds, onPress }: ModuleCardProps) {
+  const lessonCount = lessons.length;
+  const totalMinutes = lessons.reduce((s, l) => s + (l.read_time || 0), 0);
+  const completedInModule = lessons.filter((l) => completedIds.has(l.id)).length;
+  // Guests have no progress tracking → always 0 / empty.
+  const pct = isGuest ? 0 : lessonCount > 0 ? completedInModule / lessonCount : 0;
+  const pctRounded = Math.round(pct * 100);
+  const done = pctRounded === 100;
+
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={locked ? `Locked — sign in to unlock ${m.title}` : `Open ${m.title}`}
+      style={({ pressed }) => [
+        styles.card,
+        isCurrent && styles.cardCurrent,
+        pressed && { opacity: 0.85 },
+      ]}>
+      <View>
+        {m.image_url ? (
+          <Image
+            source={{ uri: m.image_url }}
+            style={[styles.thumb, { backgroundColor: m.background_color }]}
+            resizeMode="cover"
+          />
+        ) : (
+          <View style={[styles.thumb, { backgroundColor: m.background_color }]} />
+        )}
+        {locked && (
+          <View style={styles.thumbLock}>
+            <Icon d={I.shield} size={22} color={colors.white} strokeWidth={2} />
+          </View>
+        )}
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.kicker}>
+          MODULE {String(m.order_index || index + 1).padStart(2, '0')}
+        </Text>
+        <Text style={[styles.cardTitle, locked && { color: colors.mute }]} numberOfLines={1}>{m.title}</Text>
+        {lessonCount > 0 ? (
+          <View style={styles.cardMetaRow}>
+            <Icon d={I.layers} size={CARD_META_ICON} color={colors.mute} strokeWidth={2} />
+            <Text style={styles.cardMeta}>{lessonCount} lessons</Text>
+            <Text style={styles.cardMetaDot}>·</Text>
+            <Icon d={I.clock} size={CARD_META_ICON} color={colors.mute} strokeWidth={2} />
+            <Text style={styles.cardMeta}>{formatTime(totalMinutes)}</Text>
+          </View>
+        ) : (
+          <Text style={styles.cardMeta}>Loading…</Text>
+        )}
+        {locked ? (
+          <Text style={styles.lockedHint}>Sign in to unlock</Text>
+        ) : (
+          <View style={styles.track}>
+            <View
+              style={[
+                styles.fill,
+                {
+                  width: `${pctRounded}%`,
+                  backgroundColor: done ? colors.ok : colors.coral,
+                },
+              ]}
+            />
+          </View>
+        )}
+      </View>
+      {locked ? (
+        <Icon d={I.shield} size={20} color={colors.mute} strokeWidth={2} />
+      ) : (
+        <Text style={[styles.pct, done && { color: colors.ok }]}>{pctRounded}%</Text>
+      )}
+    </Pressable>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* FILTER BOTTOM SHEET                                                         */
+/* -------------------------------------------------------------------------- */
+
+type FilterSheetProps = {
+  open: boolean;
+  onClose: () => void;
+  categories: { id: number; name: string; color: string }[];
+  selectedCatId: number | null;
+  onSelect: (id: number | null) => void;
+};
+
+function FilterSheet({ open, onClose, categories, selectedCatId, onSelect }: FilterSheetProps) {
+  return (
+    <Modal
+      visible={open}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+      statusBarTranslucent>
+      <Pressable style={styles.backdrop} onPress={onClose} />
+      <View style={styles.sheet}>
+        <View style={styles.sheetHead}>
+          <Text style={styles.sheetTitle}>Filter by category</Text>
+          <Pressable
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+            hitSlop={8}
+            style={styles.sheetClose}>
+            <Icon d={I.close} size={18} color={colors.ink} strokeWidth={2.2} />
+          </Pressable>
+        </View>
+        <ScrollView showsVerticalScrollIndicator={false}>
+          <FilterRow
+            label="All"
+            color={colors.mute}
+            selected={selectedCatId == null}
+            onPress={() => onSelect(null)}
+          />
+          {categories.map((c) => (
+            <FilterRow
+              key={c.id}
+              label={c.name}
+              color={c.color}
+              selected={selectedCatId === c.id}
+              onPress={() => onSelect(c.id)}
+            />
+          ))}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function FilterRow({
+  label, color, selected, onPress,
+}: { label: string; color: string; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      style={({ pressed }) => [styles.filterRow, pressed && { opacity: 0.7 }]}>
+      <View style={[styles.dot, { backgroundColor: color }]} />
+      <Text style={styles.filterLabel}>{label}</Text>
+      {selected && (
+        <Icon d={I.check} size={18} color={colors.coral} strokeWidth={2.4} />
+      )}
+    </Pressable>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* STYLES                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const styles = StyleSheet.create({
+  wrap: { flex: 1, backgroundColor: colors.cream },
+  scroll: {
+    paddingHorizontal: SCROLL_PAD_H,
+    paddingTop: SCROLL_PAD_TOP,
+    paddingBottom: SCROLL_PAD_BOTTOM,
+  },
+  titleRow: {
+    marginTop: HEADER_MT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  title: {
+    color: colors.ink,
+    fontFamily: font('800'),
+    fontSize: TITLE_FS,
+    letterSpacing: TITLE_LS,
+    flexShrink: 1,
+  },
+  aiPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: AI_PILL_GAP,
+    paddingVertical: AI_PILL_PAD_V,
+    paddingHorizontal: AI_PILL_PAD_H,
+    borderRadius: 999,
+    backgroundColor: colors.coral,
+  },
+  aiPillText: {
+    color: colors.white,
+    fontFamily: font('700'),
+    fontSize: AI_PILL_FS,
+  },
+  meta: {
+    marginTop: META_MT,
+    color: colors.mute,
+    fontFamily: font('500'),
+    fontSize: META_FS,
+  },
+  empty: {
+    marginTop: 40,
+    textAlign: 'center',
+    color: colors.mute,
+    fontFamily: font('600'),
+    fontSize: 14,
+  },
+
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: CARD_GAP,
+    backgroundColor: colors.card,
+    borderRadius: CARD_RADIUS,
+    paddingVertical: CARD_PAD_V,
+    paddingHorizontal: CARD_PAD_H,
+    borderWidth: CARD_BORDER_W,
+    borderColor: colors.rule,
+  },
+  cardCurrent: {
+    borderWidth: CARD_BORDER_W_CURRENT,
+    borderColor: colors.coral,
+  },
+  thumb: {
+    width: THUMB_W,
+    height: THUMB_H,
+    borderRadius: THUMB_R,
+  },
+  thumbLock: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: THUMB_R,
+    backgroundColor: 'rgba(22,19,17,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockedHint: {
+    marginTop: TRACK_MT,
+    color: colors.mute,
+    fontFamily: font('700'),
+    fontSize: CARD_META_FS,
+  },
+  kicker: {
+    color: colors.coralDeep,
+    fontFamily: font('700', 'mono'),
+    fontSize: KICKER_FS,
+    letterSpacing: KICKER_LS,
+  },
+  cardTitle: {
+    color: colors.ink,
+    fontFamily: font('800'),
+    fontSize: CARD_TITLE_FS,
+    marginTop: CARD_TITLE_MT,
+  },
+  cardMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: CARD_META_GAP,
+    marginTop: CARD_META_MT,
+  },
+  cardMeta: {
+    color: colors.mute,
+    fontFamily: font('600'),
+    fontSize: CARD_META_FS,
+  },
+  cardMetaDot: {
+    color: colors.mute,
+    fontFamily: font('600'),
+    fontSize: CARD_META_FS,
+    marginHorizontal: 1,
+  },
+  track: {
+    height: TRACK_H,
+    borderRadius: TRACK_R,
+    backgroundColor: colors.cardAlt,
+    marginTop: TRACK_MT,
+    overflow: 'hidden',
+  },
+  fill: {
+    height: '100%',
+    borderRadius: TRACK_R,
+  },
+  pct: {
+    color: colors.inkSoft,
+    fontFamily: font('800'),
+    fontSize: PCT_FS,
+    marginLeft: PCT_GAP,
+  },
+
+  /* Bottom sheet */
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
+    position: 'absolute',
+    left: 0, right: 0, bottom: 0,
+    backgroundColor: colors.cream,
+    borderTopLeftRadius: SHEET_RADIUS,
+    borderTopRightRadius: SHEET_RADIUS,
+    padding: SHEET_PAD,
+    maxHeight: `${SHEET_MAX_H_PCT * 100}%`,
+  },
+  sheetHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  sheetTitle: {
+    color: colors.ink,
+    fontFamily: font('800'),
+    fontSize: SHEET_TITLE_FS,
+    letterSpacing: -0.3,
+  },
+  sheetClose: {
+    width: SHEET_CLOSE_SIZE,
+    height: SHEET_CLOSE_SIZE,
+    borderRadius: SHEET_CLOSE_SIZE / 2,
+    backgroundColor: colors.cardAlt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: SHEET_ROW_PAD_V,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.rule,
+  },
+  dot: {
+    width: SHEET_DOT_SIZE,
+    height: SHEET_DOT_SIZE,
+    borderRadius: SHEET_DOT_SIZE / 2,
+  },
+  filterLabel: {
+    flex: 1,
+    color: colors.ink,
+    fontFamily: font('700'),
+    fontSize: SHEET_ROW_FS,
+  },
+});
