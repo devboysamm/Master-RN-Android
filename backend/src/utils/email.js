@@ -1,6 +1,6 @@
 const { Resend } = require('resend');
 
-const FROM = 'Master RN <noreply@masterreactnative.me>';
+const FROM = 'Master RN <help@masterreactnative.me>';
 const SUBJECT = 'Your Master RN verification code';
 
 // Lazily construct the client so a missing key never crashes module load.

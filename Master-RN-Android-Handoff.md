@@ -83,7 +83,7 @@ The Android app needs its own backend, separate from the iOS app. The backend co
 - API base URL: `https://api.masterreactnative.me`
 - Admin panel: `https://admin.masterreactnative.me`
 - Privacy: `https://masterreactnative.me/privacy`, Terms: `https://masterreactnative.me/terms-condition`, Support: `https://masterreactnative.me/support`
-- Support email: `support@masterreactnative.me`
+- Support email: `help@masterreactnative.me`
 
 **Stack:** Node + Express + MySQL on a DigitalOcean droplet, PM2, nginx, Let's Encrypt SSL. Same shape as the iOS backend.
 
