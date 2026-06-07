@@ -26,10 +26,23 @@ export type ProfileStackParamList = {
   ProfileMain: undefined;
 };
 
+export type AppTabName = 'Home' | 'Explore' | 'Progress' | 'Chat' | 'Profile';
+
 export type AppTabParamList = {
   Home: undefined;
   Explore: undefined;
   Progress: undefined;
   Chat: undefined;
   Profile: undefined;
+};
+
+export type AuthStackParamList = {
+  AuthMain: { mode?: 'signup' | 'signin'; returnTo?: AppTabName } | undefined;
+  VerifyOtp: { email: string; name: string; password: string };
+  Forgot: undefined;
+};
+
+export type RootStackParamList = {
+  Auth: undefined;
+  App: undefined;
 };

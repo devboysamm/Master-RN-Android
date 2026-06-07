@@ -1,4 +1,5 @@
 import React from 'react';
+import { View, StyleSheet } from 'react-native';
 import { NavigationContainer, DefaultTheme, type Theme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -11,7 +12,13 @@ import Bookmarks from '../screens/app/Bookmarks';  // placeholder
 import AIChat from '../screens/app/AIChat';        // placeholder
 import Profile from '../screens/app/Profile';      // placeholder
 
+import Auth from '../screens/auth/Auth';
+import VerifyOtp from '../screens/auth/VerifyOtp';
+import Forgot from '../screens/auth/Forgot';
+
 import TabBar from '../components/TabBar';
+import AtomLogo from '../components/AtomLogo';
+import { useAuth } from '../context/AuthContext';
 import {
   HomeStackParamList,
   ExploreStackParamList,
@@ -19,18 +26,21 @@ import {
   ChatStackParamList,
   ProfileStackParamList,
   AppTabParamList,
+  AuthStackParamList,
+  RootStackParamList,
 } from './types';
 import { colors } from '../theme/tokens';
 
-// One native stack per tab — exactly like the reference. ModuleDetail lives
-// inside the Home/Explore/Progress stacks, so it pushes over the tab content
-// with the floating tab bar staying visible and a working back action.
+// One native stack per tab — exactly like the reference. ModuleDetail and
+// LessonReader live inside the Home/Explore/Progress stacks.
 const HomeStack = createNativeStackNavigator<HomeStackParamList>();
 const ExploreStack = createNativeStackNavigator<ExploreStackParamList>();
 const ProgressStack = createNativeStackNavigator<ProgressStackParamList>();
 const ChatStack = createNativeStackNavigator<ChatStackParamList>();
 const ProfileStack = createNativeStackNavigator<ProfileStackParamList>();
 const Tabs = createBottomTabNavigator<AppTabParamList>();
+const AuthStack = createNativeStackNavigator<AuthStackParamList>();
+const RootStack = createNativeStackNavigator<RootStackParamList>();
 
 const stackOptions = { headerShown: false } as const;
 
@@ -95,6 +105,25 @@ function AppTabs() {
   );
 }
 
+// Auth flow. The app is guest-first, so there is no Splash/Welcome wall — the
+// flow opens directly on the Auth screen (sign in / sign up), reached when a
+// guest taps a gate (requestAuth) or "Sign in / Sign up" from Profile.
+function AuthFlow({ pendingAuthMode }: { pendingAuthMode: 'signin' | 'signup' | null }) {
+  return (
+    <AuthStack.Navigator
+      initialRouteName="AuthMain"
+      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.splashBg } }}>
+      <AuthStack.Screen
+        name="AuthMain"
+        component={Auth}
+        initialParams={pendingAuthMode ? { mode: pendingAuthMode } : undefined}
+      />
+      <AuthStack.Screen name="VerifyOtp" component={VerifyOtp} />
+      <AuthStack.Screen name="Forgot" component={Forgot} />
+    </AuthStack.Navigator>
+  );
+}
+
 // Paint every navigation surface in the app's cream rather than the default
 // white, so a scene that ever fails to render shows a branded background.
 const navTheme: Theme = {
@@ -102,13 +131,37 @@ const navTheme: Theme = {
   colors: { ...DefaultTheme.colors, background: colors.cream, card: colors.cream },
 };
 
-// Phase 2: bottom tabs (Home, Explore, Progress, Chat, Profile), each a native
-// stack. Auth flow and the remaining screens land in later tasks; the app is
-// guest-first, so the tabs render directly.
+// Guest-first: a real session → the tabs; otherwise the app defaults to guest
+// (also the tabs). The Auth flow only appears when requestAuth() clears guest.
 export default function RootNavigator() {
+  const { user, isGuest, hydrated, pendingAuthMode } = useAuth();
+
+  if (!hydrated) {
+    // Brand splash while we restore the session.
+    return (
+      <View style={styles.splash}>
+        <AtomLogo size={120} />
+      </View>
+    );
+  }
+
+  const authed = !!user || isGuest;
+
   return (
     <NavigationContainer theme={navTheme}>
-      <AppTabs />
+      <RootStack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.cream } }}>
+        {authed ? (
+          <RootStack.Screen name="App" component={AppTabs} />
+        ) : (
+          <RootStack.Screen name="Auth">
+            {() => <AuthFlow pendingAuthMode={pendingAuthMode} />}
+          </RootStack.Screen>
+        )}
+      </RootStack.Navigator>
     </NavigationContainer>
   );
 }
+
+const styles = StyleSheet.create({
+  splash: { flex: 1, backgroundColor: colors.splashBg, alignItems: 'center', justifyContent: 'center' },
+});

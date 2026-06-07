@@ -5,6 +5,7 @@ import PillButton from './PillButton';
 import { I } from '../theme/icons';
 import { colors, radii, spacing, type } from '../theme/tokens';
 import { font } from '../theme/fonts';
+import { useAuth } from '../context/AuthContext';
 
 const DEFAULT_TITLE = 'Continue learning with a free account';
 const DEFAULT_SUBTITLE = 'Sign in or register to unlock all modules and lessons.';
@@ -14,6 +15,7 @@ type CardProps = { title?: string; subtitle?: string; onDismiss?: () => void };
 // Shared sign-in card. The reference fades + scales it in via reanimated; that
 // animation is deferred (the card is presented inside Modal's fade instead).
 function GateCard({ title, subtitle, onDismiss }: CardProps) {
+  const { requestAuth } = useAuth();
   return (
     <View style={styles.card}>
       <View style={styles.iconRing}>
@@ -21,8 +23,8 @@ function GateCard({ title, subtitle, onDismiss }: CardProps) {
       </View>
       <Text style={styles.head}>{title ?? DEFAULT_TITLE}</Text>
       <Text style={styles.sub}>{subtitle ?? DEFAULT_SUBTITLE}</Text>
-      {/* The auth flow is a later task; for now this dismisses the gate. */}
-      <PillButton variant="primary" onPress={() => onDismiss?.()} style={styles.cta}>
+      {/* Route into the real auth flow (clears guest → RootStack shows Auth). */}
+      <PillButton variant="primary" onPress={() => requestAuth('signup')} style={styles.cta}>
         Sign in or Register
       </PillButton>
       <Pressable
