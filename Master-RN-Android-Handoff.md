@@ -78,14 +78,22 @@ Note: the phases in Section 9 are only the **order** of work. They do not overri
 
 The Android app needs its own backend, separate from the iOS app. The backend code is the same as `backend-api/` in the repo, just deployed to a new server under a new domain, with its own database and its own content.
 
-**Placeholders, replace once provisioned:**
-- New domain: `masterreactnative.me`
+**Current infrastructure (AWS EC2):**
+- **Server:** AWS EC2 t3.small, Ubuntu 24.04, region Mumbai (ap-south-1)
+- **Public IP:** 35.154.33.62 (Elastic IP, fixed)
+- **Domain:** masterreactnative.me (Namecheap)
+- **DNS A records:** @, api, admin, www all point to 35.154.33.62
+- **HTTPS:** Let's Encrypt certbot certificate covering all four names (auto-renewing via cron)
+- **Reverse proxy:** nginx
+- **Process manager:** PM2 running `master-rn-backend` (Node/Express on localhost:5000)
+- **Database:** MySQL 8, database name `master-react-native`, user `mrn_backend`
+- **Swap:** 2GB swap file configured (2GB RAM alone wedged during install)
+
+**Endpoints:**
 - API base URL: `https://api.masterreactnative.me`
 - Admin panel: `https://admin.masterreactnative.me`
 - Privacy: `https://masterreactnative.me/privacy`, Terms: `https://masterreactnative.me/terms-condition`, Support: `https://masterreactnative.me/support`
 - Support email: `help@masterreactnative.me`
-
-**Stack:** Node + Express + MySQL on a DigitalOcean droplet, PM2, nginx, Let's Encrypt SSL. Same shape as the iOS backend.
 
 **Guest access requirement (important).** Unlike the iOS backend, the new backend must allow **unauthenticated (guest) read access** to modules and lessons, so the app works with no account. Authentication is required only for the AI tutor, saving progress, and bookmarks. Confirm and adjust this when deploying the backend.
 
@@ -95,27 +103,49 @@ The Android app needs its own backend, separate from the iOS app. The backend co
 
 ---
 
-## 1B. Provisioning checklist (do this first, then bring the values back)
+## 1A. CI/CD (GitHub Actions auto-deploy)
 
-Set these up, then report the values so this file and the app config can be filled in with real values instead of placeholders.
+The repository has automated deployment via GitHub Actions.
 
-1. **Domain:** choose one domain for this app and point its DNS to the new droplet. Plan subdomains `api.`, `admin.`, and the root for the site and legal pages.
-2. **DigitalOcean droplet:** Ubuntu, similar size to the current server. Note its IP.
-3. **nginx + SSL:** serve `api.<domain>`, `admin.<domain>`, and `<domain>` with Let's Encrypt certificates.
-4. **MySQL:** install it, create the database and a DB user, note the credentials.
-5. **Deploy the backend:** clone `backend-api` to the droplet, set its env (below), run under PM2, put nginx in front.
-6. **Backend env and keys to create:**
-   - MySQL host, user, password, database name
-   - A new JWT/session secret (random)
-   - A **new Google Gemini API key** (from Google AI Studio)
-   - **Email sending for OTP:** SMTP host/user/password, or an email API key (SendGrid, Resend, etc.)
-   - Optional: a Sentry DSN
-   - Anything else listed in the backend's `.env.example`
-7. **Import the content:** run the import scripts so all 17 modules and 304 lessons load into the new database.
-8. **Deploy the admin panel:** build `admin-panel` pointed at `https://api.<domain>`, serve it at `https://admin.<domain>`, and create the admin user on the new server.
-9. **Legal and support pages:** host privacy, terms, and support on the new domain (the app cannot reuse masterreactnative.dev). A working privacy policy URL is required for Google Play.
+**Trigger:** Push to `main` branch
+**Path filter:** Deploys run when changes are pushed to:
+- `backend/**`
+- `admin/**`
+- `website/**`
+- `.github/workflows/deploy.yml`
+- `deploy.sh` (at repo root)
 
-**Bring back:** the domain, the API base URL, the admin URL, the privacy/terms/support URLs, a support email, and confirmation that the server is up, content imported, Gemini key set, and OTP email working. Then the placeholders here get replaced with real values.
+**Deploy script:** `deploy.sh` is committed at repo root (previously it was never in git — that's why it was lost when the droplet died).
+
+**Authentication:** Dedicated ed25519 CI deploy key authorizes the GitHub Action to SSH into the server.
+
+**GitHub Secrets configured:**
+- `DROPLET_HOST`: 35.154.33.62
+- `DROPLET_USER`: ubuntu
+- `DROPLET_SSH_KEY`: CI deploy private key
+
+**What the deploy does:**
+1. SSH into the EC2 instance
+2. Pull latest code
+3. Install dependencies (backend and admin)
+4. Run database migrations if needed
+5. Restart the PM2 process (`master-rn-backend`)
+6. Build and deploy the admin panel
+
+**Manual verification:** After any push, check the Actions tab in GitHub to confirm the deploy succeeded.
+
+---
+
+## 1B. ENV / KEYS (current state)
+
+**`.env` file (server-only, NOT in git):**
+- `RESEND_API_KEY`: Real API key configured; OTP email sending works
+- `GEMINI_API_KEY`: Placeholder/stub; AI tutor is not yet functional
+- `JWT_SECRET`: Random-generated secret for session tokens
+- `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`: MySQL credentials
+- `SENTRY_DSN`: Optional crash reporting (if configured)
+
+**AI tutor note:** The Gemini API key is currently a placeholder. The AI tutor feature exists in the UI but calls to the backend return mock/error responses. **Pending decision:** Possibly move the tutor to Groq instead of Gemini for better performance/cost.
 
 ---
 
@@ -199,14 +229,33 @@ Rebuild each of these in React Native CLI to match the existing Expo app. Read t
 
 ## 6. Android-specific deltas
 
+### 6A. Google Play API Requirement (CRITICAL)
+
+**From August 31, 2026**, new apps and updates must target **Android 16 (API level 36)** or higher to be submitted to Google Play.
+
+- This app **must be built with `targetSdk 36`** for release.
+- An extension to **November 1, 2026** may be available via Play Console, but the plan is to target 36.
+- Verify the current requirement at https://developer.android.com/google/play/requirements/target-sdk before building the release AAB.
+
+### 6B. Push notifications (FCM)
+
 1. **Push uses FCM, not APNs.**
    - Create a **new, separate** Firebase project for this app (do not reuse any previous project's Firebase), add an Android app with the new applicationId, and put `google-services.json` in `android/app/`.
    - The app gets an **FCM token** via `@react-native-firebase/messaging` and registers it through the device-token endpoint in `API_REFERENCE.md`.
    - **Backend note:** the new backend must send push via FCM for Android tokens. This needs a small addition on the new backend. It can be deferred, the app is fully functional without push. Treat push delivery as its own phase.
+
+### 6C. Build and signing
+
 2. **Build output is an AAB,** not an APK: `cd android && ./gradlew bundleRelease`.
 3. **App signing:** generate an upload keystore, configure it in `android/app/build.gradle` and `gradle.properties` (keep keystore and passwords out of git), enroll in **Play App Signing**. Losing the keystore blocks future updates, so save it safely.
-4. **SDK levels:** `minSdkVersion` 24, `targetSdkVersion` at the level Google Play currently requires for new submissions (verify at submission time).
+4. **SDK levels:** `minSdkVersion` 24, `targetSdkVersion` 36 (per Section 6A requirement).
 5. **Permissions:** only what is used (internet, notifications). No location, camera, contacts.
+
+### 6D. Build gotchas
+
+- **Reanimated v4 requires react-native-worklets:** If using Reanimated for animations, ensure `react-native-worklets` is properly linked.
+- **Metro runs on port 8081 only:** Never start a second Metro instance; never change the port. If port 8081 is taken, kill the existing process first.
+- **One Metro at a time:** Only one React Native app can be actively debugging at a time on the default port.
 
 ---
 
@@ -233,22 +282,35 @@ Rebuild each of these in React Native CLI to match the existing Expo app. Read t
 
 ---
 
-## 9. Suggested build order
+## 9. Content safety note (NEVER re-run)
 
-0. **Phase 0, provision the backend:** complete Section 1B, bring back the real domain and URLs, and replace the placeholders here.
+**`seed-curriculum.js` and related import scripts must NEVER be re-run on a production database once users exist.** These scripts wipe and re-import the 17 modules and 304 lessons. Re-running after launch would delete all user progress, bookmarks, and accounts.
+
+If curriculum updates are needed post-launch, they must be done via:
+- The admin panel (edit individual lessons)
+- A migration script that updates content without wiping tables
+- A separate content-versioning system (not yet built)
+
+**Before running any curriculum script, confirm:** Is this a fresh database with no users? If no, do not run it.
+
+---
+
+## 10. Suggested build order
+
+0. **Phase 0, verify backend:** Confirm the AWS EC2 server is up, content imported, OTP email working, and the CI/CD deploy pipeline is functional.
 1. **Phase 1, foundation:** generate `API_REFERENCE.md`, create the RN CLI project, port theme and assets, set up the API client and the guest/session state, and build splash to guest Home (no login wall).
 2. **Phase 2, core app:** learning path, module detail, lesson screen (HTML and code copy). The heart of the app.
 3. **Phase 3, auth and gated features:** the sign up / OTP / sign in / reset flow (reached from Profile), then the AI tutor, progress, and bookmarks gated behind it.
 4. **Phase 4, the rest:** cheat sheets, profile and delete account, about, help, report a problem, settings.
 5. **Phase 5, polish:** empty/loading/error states, brand pass against the iOS app.
-6. **Phase 6, Android release prep:** signing, release AAB, Firebase/FCM (and backend FCM sending if push is in scope), on-device testing.
+6. **Phase 6, Android release prep:** signing, release AAB, targetSdk 36 verification, Firebase/FCM (and backend FCM sending if push is in scope), on-device testing.
 7. **Phase 7, Play submission:** listing, feature graphic, screenshots, data safety, content rating, demo account, upload, roll out.
 
 Remember rule 5: one screen at a time within every phase.
 
 ---
 
-## 10. What is reused vs what you provision
+## 11. What is reused vs what you provision
 
 **Reused (from the repo, no rebuild):**
 - Backend and admin panel CODE.
@@ -257,12 +319,17 @@ Remember rule 5: one screen at a time within every phase.
 - The app's screens and UI as a reference (the Expo app).
 
 **You provision fresh (separate from iOS):**
-- A new DigitalOcean droplet, domain, DNS, SSL.
-- A new MySQL database, with the content imported into it.
-- A deployed backend instance and a deployed admin panel on the new domain.
-- New keys: Gemini API key, JWT secret, OTP email credentials.
+- AWS EC2 server (t3.small, Mumbai), domain, DNS, SSL.
+- MySQL 8 database, with the content imported into it.
+- Deployed backend instance and a deployed admin panel on the new domain.
+- New keys: JWT secret, OTP email credentials (Gemini key is placeholder for now).
 - New legal and support pages on the new domain.
-- A new demo account for store review.
+- New demo account for store review.
 - Zero identifiers from any previous project (see the CRITICAL RULE section, run the verification grep before publishing).
 
 Your build job is the Android client: rebuild the app in React Native CLI, guest first, wired to the new backend per `API_REFERENCE.md`, matching the existing iOS app's UI/UX, and ship it on Google Play under The Handi Nation.
+
+---
+
+**Document version:** 2026-07-29  
+**Last updated:** Hosting migrated to AWS EC2, CI/CD restored, Google Play API 36 requirement added
