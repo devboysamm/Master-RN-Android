@@ -7,6 +7,7 @@ on:
       - 'admin/**'
       - 'website/**'
       - '.github/workflows/deploy.yml'
+      - 'deploy.sh'
 jobs:
   deploy:
     runs-on: ubuntu-latest
