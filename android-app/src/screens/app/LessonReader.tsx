@@ -80,7 +80,7 @@ export default function LessonReader() {
   const nav = useNavigation<NativeStackNavigationProp<ExploreStackParamList>>();
   const { params } = useRoute<RouteProp<ExploreStackParamList, 'LessonReader'>>();
   const { width } = useWindowDimensions();
-  const { isGuest } = useAuth();
+  const { isGuest, user } = useAuth();
   const lesson = useLesson(params.lessonId);
   // moduleId comes from the route param; until that (or the loaded lesson's
   // module_id) is known we pass undefined so the hooks wait instead of
@@ -209,9 +209,10 @@ export default function LessonReader() {
     return () => parent?.setOptions({ tabBarStyle: undefined });
   }, [nav]));
 
-  // Persist this lesson as "last opened" (no-op stub for now).
+  // Persist this lesson as "last opened" so Home's continue card resumes here.
+  // Gated on the signed-in user — guests do not save progress.
   useEffect(() => {
-    if (!l) return;
+    if (!l || !user) return;
     setLastLesson({
       lessonId: l.id,
       moduleId: l.module_id,
@@ -222,7 +223,7 @@ export default function LessonReader() {
       moduleNumber: m?.order_index ?? undefined,
       updatedAt: Date.now(),
     });
-  }, [l?.id, m?.id, idx, total]);
+  }, [l?.id, m?.id, idx, total, user]);
 
   return (
     <SafeAreaView style={styles.wrap} edges={['top']}>
